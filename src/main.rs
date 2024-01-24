@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::{prelude::*, window::PrimaryWindow};
 
 const PLAYER_RADIUS: f32 = 16.0;
@@ -14,10 +16,24 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
         .init_resource::<InputBindings>()
+        .add_state::<AppState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_player, move_enemy, wraparound).chain())
+        .add_systems(
+            Update,
+            (move_player, move_enemy, wraparound, collision_detection)
+                .chain()
+                .run_if(in_state(AppState::Game)),
+        )
         .add_systems(Update, debug_start)
+        .add_systems(OnEnter(AppState::Game), setup_game)
         .run();
+}
+
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
+enum AppState {
+    #[default]
+    Menu,
+    Game,
 }
 
 #[derive(Resource)]
@@ -65,18 +81,18 @@ struct Enemy {
     speed: f32,
 }
 
-#[derive(Component)]
-struct Wraparound;
-
-#[derive(Component)]
-struct Velocity(Vec3);
-
 enum SpawnSide {
     Top,
     Bottom,
     Left,
     Right,
 }
+
+#[derive(Component)]
+struct Wraparound;
+
+#[derive(Component)]
+struct Velocity(Vec3);
 
 fn setup(
     mut commands: Commands,
@@ -88,28 +104,20 @@ fn setup(
 }
 
 fn debug_start(
+    mut next_state: ResMut<NextState<AppState>>,
     player_query: Query<&Player>,
-    commands: Commands,
-    window: Query<&Window, With<PrimaryWindow>>,
-    asset_handles: Res<AssetHandles>,
     input: Res<Input<KeyCode>>,
 ) {
     if input.just_pressed(KeyCode::K) && player_query.is_empty() {
-        spawn_player(player_query, commands, asset_handles);
-    } else if input.just_pressed(KeyCode::L) {
-        spawn_enemy(commands, asset_handles, window, 0.5, SpawnSide::Top);
+        next_state.set(AppState::Game);
     }
 }
 
-fn spawn_player(
-    player_query: Query<&Player>,
+fn setup_game(
     mut commands: Commands,
+    window: Query<&Window, With<PrimaryWindow>>,
     asset_handles: Res<AssetHandles>,
 ) {
-    if !player_query.is_empty() {
-        panic!("Tried to spawn the player when one was already present");
-    }
-
     commands.spawn((
         Player,
         Wraparound,
@@ -121,6 +129,7 @@ fn spawn_player(
             ..default()
         },
     ));
+    spawn_enemy(commands, asset_handles, window, 0.5, SpawnSide::Top);
 }
 
 fn move_player(
@@ -252,6 +261,27 @@ fn wraparound(
             transform.translation.y = bottom;
         } else if transform.translation.y < bottom {
             transform.translation.y = top;
+        }
+    });
+}
+
+fn collision_detection(
+    player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    enemy_query: Query<&Transform, (With<Enemy>, Without<Player>)>,
+) {
+    if player_transform.is_empty() || enemy_query.is_empty() {
+        return;
+    }
+
+    let player_transform = player_transform.single();
+
+    enemy_query.par_iter().for_each(|enemy_transform| {
+        let distance_squared = player_transform
+            .translation
+            .distance_squared(enemy_transform.translation);
+
+        if distance_squared < (PLAYER_RADIUS + ENEMY_RADIUS).powf(2.0) {
+            dbg!("ummmmmm, guys!");
         }
     });
 }
