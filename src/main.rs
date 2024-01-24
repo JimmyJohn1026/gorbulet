@@ -11,6 +11,9 @@ const PLAYER_COLOR: Color = Color::BLUE;
 const PLAYER_ACCEL: f32 = 600.0;
 const PLAYER_MAX_SPEED: f32 = 300.0;
 
+const HIT_KNOCKBACK: f32 = 500.0;
+const HIT_DECAY_RATE: f32 = -0.003;
+
 const ENEMY_RADIUS: f32 = 14.0;
 const ENEMY_ACCEL: f32 = 600.0;
 const ENEMY_MIN_SPEED: f32 = 150.0;
@@ -24,6 +27,7 @@ fn main() {
         .add_plugins(DefaultPlugins)
         .init_resource::<InputBindings>()
         .add_state::<AppState>()
+        .add_event::<HitPlayer>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -33,6 +37,7 @@ fn main() {
                 move_enemy,
                 wraparound,
                 collision_detection,
+                hit_player,
             )
                 .chain()
                 .run_if(in_state(AppState::Game)),
@@ -112,6 +117,9 @@ struct EnemyBundle {
     velocity: Velocity,
     color_mesh_2d_bundle: ColorMesh2dBundle,
 }
+
+#[derive(Event, Default)]
+struct HitPlayer;
 
 impl Default for EnemyBundle {
     fn default() -> Self {
@@ -227,6 +235,30 @@ fn get_spawn_position(window: Query<&Window, With<PrimaryWindow>>, spawn_side: S
     }
 }
 
+fn hit_player(
+    hit_event: EventReader<HitPlayer>,
+    player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    mut enemy_query: Query<(&Transform, &mut Velocity), (With<Enemy>, Without<Player>)>,
+) {
+    if hit_event.is_empty() {
+        return;
+    }
+
+    let player_transform = player_transform.single();
+
+    enemy_query
+        .par_iter_mut()
+        .for_each(|(transform, mut velocity)| {
+            let direction =
+                (transform.translation - player_transform.translation).normalize_or_zero();
+            let distance = transform.translation.distance(player_transform.translation);
+
+            let speed = HIT_KNOCKBACK * E.powf(HIT_DECAY_RATE * (distance - (PLAYER_RADIUS + ENEMY_RADIUS)));
+
+            velocity.0 += direction * speed;
+        });
+}
+
 fn move_player(
     bindings: Res<InputBindings>,
     input: Res<Input<KeyCode>>,
@@ -284,7 +316,11 @@ fn move_enemy(
             let direction =
                 (player_transform.translation - transform.translation).normalize_or_zero();
 
-            velocity.0 = direction * enemy.speed;
+            velocity.0 = vec3_move_toward(
+                velocity.0,
+                direction * enemy.speed,
+                ENEMY_ACCEL * time.delta_seconds(),
+            );
 
             transform.translation += velocity.0 * time.delta_seconds();
         });
@@ -329,20 +365,27 @@ fn wraparound(
 fn collision_detection(
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     enemy_query: Query<&Transform, (With<Enemy>, Without<Player>)>,
+    mut hit_event: EventWriter<HitPlayer>,
 ) {
     if player_transform.is_empty() || enemy_query.is_empty() {
         return;
     }
 
     let player_transform = player_transform.single();
+    let mut hit_player = false;
 
-    enemy_query.par_iter().for_each(|enemy_transform| {
+    for enemy_transform in enemy_query.iter() {
         let distance_squared = player_transform
             .translation
             .distance_squared(enemy_transform.translation);
 
         if distance_squared < (PLAYER_RADIUS + ENEMY_RADIUS).powf(2.0) {
-            dbg!("ummmmmm, guys!");
+            hit_player = true;
+            break;
         }
-    });
+    }
+
+    if hit_player {
+        hit_event.send_default();
+    }
 }
