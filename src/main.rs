@@ -83,18 +83,17 @@ impl Default for InputBindings {
 
 #[derive(Resource)]
 struct AssetHandles {
-    player: (Handle<Mesh>, Handle<ColorMaterial>),
-    enemy: Handle<Mesh>,
+    player_mesh: Handle<Mesh>,
+    player_material: Handle<ColorMaterial>,
+    enemy_mesh: Handle<Mesh>,
 }
 
 impl AssetHandles {
     fn new(mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<ColorMaterial>>) -> Self {
         Self {
-            player: (
-                meshes.add(shape::Circle::new(PLAYER_RADIUS).into()),
-                materials.add(ColorMaterial::from(PLAYER_COLOR)),
-            ),
-            enemy: meshes.add(shape::Circle::new(ENEMY_RADIUS).into()),
+            player_mesh: meshes.add(shape::Circle::new(PLAYER_RADIUS).into()),
+            player_material: materials.add(ColorMaterial::from(PLAYER_COLOR)),
+            enemy_mesh: meshes.add(shape::Circle::new(ENEMY_RADIUS).into()),
         }
     }
 }
@@ -183,8 +182,8 @@ fn setup_game(
         Wraparound,
         Velocity(Vec3::ZERO),
         ColorMesh2dBundle {
-            mesh: asset_handles.player.0.clone().into(),
-            material: asset_handles.player.1.clone().into(),
+            mesh: asset_handles.player_mesh.clone().into(),
+            material: asset_handles.player_material.clone().into(),
             transform: Transform::from_translation(Vec3::ZERO),
             ..default()
         },
@@ -205,8 +204,8 @@ fn update_game(
     commands.spawn(EnemyBundle {
         enemy: Enemy { speed: speed },
         color_mesh_2d_bundle: ColorMesh2dBundle {
-            mesh: asset_handles.enemy.clone().into(),
-            material: asset_handles.player.1.clone().into(),
+            mesh: asset_handles.enemy_mesh.clone().into(),
+            material: asset_handles.player_material.clone().into(),
             transform: Transform::from_translation(get_spawn_position(window, spawn_side)),
             ..default()
         },
