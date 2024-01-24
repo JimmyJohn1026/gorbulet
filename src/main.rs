@@ -1,6 +1,10 @@
-use std::time::Duration;
+use std::{f32::consts::E, time::Duration};
 
 use bevy::{prelude::*, window::PrimaryWindow};
+use rand::{
+    distributions::{Distribution, Standard},
+    Rng,
+};
 
 const PLAYER_RADIUS: f32 = 16.0;
 const PLAYER_COLOR: Color = Color::BLUE;
@@ -12,6 +16,9 @@ const ENEMY_ACCEL: f32 = 600.0;
 const ENEMY_MIN_SPEED: f32 = 150.0;
 const ENEMY_MAX_SPEED: f32 = 400.0;
 
+const SPEED_GROWTH_RATE: f32 = 0.15;
+const SPEED_MIDPOINT: f32 = 20.0;
+
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
@@ -20,7 +27,13 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(
             Update,
-            (move_player, move_enemy, wraparound, collision_detection)
+            (
+                update_game,
+                move_player,
+                move_enemy,
+                wraparound,
+                collision_detection,
+            )
                 .chain()
                 .run_if(in_state(AppState::Game)),
         )
@@ -34,6 +47,19 @@ enum AppState {
     #[default]
     Menu,
     Game,
+}
+
+#[derive(Resource, Default)]
+struct GameInfo {
+    state: GameState,
+    points: i8,
+}
+
+#[derive(Debug, Default)]
+enum GameState {
+    #[default]
+    Running,
+    Hit,
 }
 
 #[derive(Resource)]
@@ -81,11 +107,43 @@ struct Enemy {
     speed: f32,
 }
 
+#[derive(Bundle)]
+struct EnemyBundle {
+    enemy: Enemy,
+    velocity: Velocity,
+    color_mesh_2d_bundle: ColorMesh2dBundle,
+}
+
+impl Default for EnemyBundle {
+    fn default() -> Self {
+        Self {
+            enemy: Enemy {
+                speed: ENEMY_MIN_SPEED,
+            },
+            velocity: Velocity(Vec3::ZERO),
+            color_mesh_2d_bundle: ColorMesh2dBundle::default(),
+        }
+    }
+}
+
 enum SpawnSide {
     Top,
     Bottom,
     Left,
     Right,
+}
+
+impl Distribution<SpawnSide> for Standard {
+    fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> SpawnSide {
+        let index: u8 = rng.gen_range(0..4);
+        match index {
+            0 => SpawnSide::Top,
+            1 => SpawnSide::Bottom,
+            2 => SpawnSide::Left,
+            3 => SpawnSide::Right,
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[derive(Component)]
@@ -118,6 +176,8 @@ fn setup_game(
     window: Query<&Window, With<PrimaryWindow>>,
     asset_handles: Res<AssetHandles>,
 ) {
+    commands.init_resource::<GameInfo>();
+
     commands.spawn((
         Player,
         Wraparound,
@@ -129,7 +189,43 @@ fn setup_game(
             ..default()
         },
     ));
-    spawn_enemy(commands, asset_handles, window, 0.5, SpawnSide::Top);
+}
+
+fn update_game(
+    mut commands: Commands,
+    game_info: Res<GameInfo>,
+    asset_handles: Res<AssetHandles>,
+    window: Query<&Window, With<PrimaryWindow>>,
+) {
+    let spawn_side: SpawnSide = rand::random();
+    let speed_float: f32 =
+        1.0 / (1.0 + E.powf(-SPEED_GROWTH_RATE * (game_info.points as f32 - SPEED_MIDPOINT)));
+    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED;
+
+    commands.spawn(EnemyBundle {
+        enemy: Enemy { speed: speed },
+        color_mesh_2d_bundle: ColorMesh2dBundle {
+            mesh: asset_handles.enemy.clone().into(),
+            material: asset_handles.player.1.clone().into(),
+            transform: Transform::from_translation(get_spawn_position(window, spawn_side)),
+            ..default()
+        },
+        ..default()
+    });
+}
+
+fn get_spawn_position(window: Query<&Window, With<PrimaryWindow>>, spawn_side: SpawnSide) -> Vec3 {
+    let window = window.single();
+    let vertical = window.height() / 2.0 + PLAYER_RADIUS;
+    let horizontal = window.width() / 2.0 + PLAYER_RADIUS;
+    let rand_float: f32 = rand::random();
+
+    match spawn_side {
+        SpawnSide::Top => Vec3::new(horizontal * (2.0 * rand_float - 1.0), vertical, 0.0),
+        SpawnSide::Bottom => Vec3::new(horizontal * (2.0 * rand_float - 1.0), -vertical, 0.0),
+        SpawnSide::Left => Vec3::new(-horizontal, vertical * (2.0 * rand_float - 1.0), 0.0),
+        SpawnSide::Right => Vec3::new(horizontal, vertical * (2.0 * rand_float - 1.0), 0.0),
+    }
 }
 
 fn move_player(
@@ -170,40 +266,6 @@ fn get_direction(bindings: Res<InputBindings>, input: Res<Input<KeyCode>>) -> Ve
     }
 
     return direction.normalize_or_zero();
-}
-
-fn spawn_enemy(
-    mut commands: Commands,
-    asset_handles: Res<AssetHandles>,
-    window: Query<&Window, With<PrimaryWindow>>,
-    speed_weight: f32,
-    spawn_side: SpawnSide,
-) {
-    commands.spawn((
-        Enemy {
-            speed: speed_weight * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED,
-        },
-        Velocity(Vec3::ZERO),
-        ColorMesh2dBundle {
-            mesh: asset_handles.enemy.clone().into(),
-            material: asset_handles.player.1.clone().into(),
-            //material: materials.add(ColorMaterial::from(PLAYER_COLOR)),
-            transform: Transform::from_translation(get_spawn_position(window, spawn_side)),
-            ..default()
-        },
-    ));
-}
-
-fn get_spawn_position(window: Query<&Window, With<PrimaryWindow>>, spawn_side: SpawnSide) -> Vec3 {
-    let window = window.single();
-    let vertical = window.height() / 2.0 + PLAYER_RADIUS;
-    let horizontal = window.width() / 2.0 + PLAYER_RADIUS;
-    let rand_float: f32 = rand::random();
-
-    match spawn_side {
-        SpawnSide::Top => Vec3::new(horizontal * (2.0 * rand_float - 1.0), vertical, 0.0),
-        _ => Vec3::ZERO,
-    }
 }
 
 fn move_enemy(
