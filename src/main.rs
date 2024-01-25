@@ -1,4 +1,4 @@
-use std::{f32::consts::E, time::Duration};
+use std::f32::consts::E;
 
 use bevy::{prelude::*, window::PrimaryWindow};
 use rand::{
@@ -11,16 +11,23 @@ const PLAYER_COLOR: Color = Color::BLUE;
 const PLAYER_ACCEL: f32 = 600.0;
 const PLAYER_MAX_SPEED: f32 = 300.0;
 
-const HIT_KNOCKBACK: f32 = 500.0;
-const HIT_DECAY_RATE: f32 = -0.003;
+const HIT_KNOCKBACK: f32 = 700.0;
+const HIT_DECAY_RATE: f32 = -0.002;
 
 const ENEMY_RADIUS: f32 = 14.0;
-const ENEMY_ACCEL: f32 = 600.0;
+const ENEMY_COLOR: Color = Color::RED;
+const ENEMY_MIN_ACCEL: f32 = 400.0;
+const ENEMY_MAX_ACCEL: f32 = 700.0;
 const ENEMY_MIN_SPEED: f32 = 150.0;
 const ENEMY_MAX_SPEED: f32 = 400.0;
+const ENEMY_COIN_PULL: f32 = 10.0;
 
 const SPEED_GROWTH_RATE: f32 = 0.15;
 const SPEED_MIDPOINT: f32 = 20.0;
+const SPEED_MAX_DEVIATION: f32 = 50.0;
+
+const COIN_RADIUS: f32 = 8.0;
+const COIN_COLOR: Color = Color::YELLOW;
 
 fn main() {
     App::new()
@@ -28,16 +35,18 @@ fn main() {
         .init_resource::<InputBindings>()
         .add_state::<AppState>()
         .add_event::<HitPlayer>()
+        .add_event::<HitCoin>()
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
-                update_game,
                 move_player,
                 move_enemy,
                 wraparound,
-                collision_detection,
+                enemy_collision,
+                coin_collision,
                 hit_player,
+                hit_coin,
             )
                 .chain()
                 .run_if(in_state(AppState::Game)),
@@ -49,8 +58,8 @@ fn main() {
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
 enum AppState {
-    #[default]
     Menu,
+    #[default]
     Game,
 }
 
@@ -91,6 +100,9 @@ struct AssetHandles {
     player_mesh: Handle<Mesh>,
     player_material: Handle<ColorMaterial>,
     enemy_mesh: Handle<Mesh>,
+    enemy_material: Handle<ColorMaterial>,
+    coin_mesh: Handle<Mesh>,
+    coin_material: Handle<ColorMaterial>,
 }
 
 impl AssetHandles {
@@ -99,6 +111,9 @@ impl AssetHandles {
             player_mesh: meshes.add(shape::Circle::new(PLAYER_RADIUS).into()),
             player_material: materials.add(ColorMaterial::from(PLAYER_COLOR)),
             enemy_mesh: meshes.add(shape::Circle::new(ENEMY_RADIUS).into()),
+            enemy_material: materials.add(ColorMaterial::from(ENEMY_COLOR)),
+            coin_mesh: meshes.add(shape::Circle::new(COIN_RADIUS).into()),
+            coin_material: materials.add(ColorMaterial::from(COIN_COLOR)),
         }
     }
 }
@@ -109,29 +124,43 @@ struct Player;
 #[derive(Component)]
 struct Enemy {
     speed: f32,
+    accel: f32,
+    future_prediction: f32,
+    coin_pull: f32,
 }
 
 #[derive(Bundle)]
 struct EnemyBundle {
     enemy: Enemy,
+    wraparound: Wraparound,
     velocity: Velocity,
     color_mesh_2d_bundle: ColorMesh2dBundle,
 }
-
-#[derive(Event, Default)]
-struct HitPlayer;
 
 impl Default for EnemyBundle {
     fn default() -> Self {
         Self {
             enemy: Enemy {
                 speed: ENEMY_MIN_SPEED,
+                accel: ENEMY_MIN_ACCEL,
+                future_prediction: 0.0,
+                coin_pull: 0.0,
             },
+            wraparound: Wraparound::default(),
             velocity: Velocity(Vec3::ZERO),
             color_mesh_2d_bundle: ColorMesh2dBundle::default(),
         }
     }
 }
+
+#[derive(Event, Default)]
+struct HitPlayer;
+
+#[derive(Component)]
+struct Coin;
+
+#[derive(Event, Default)]
+struct HitCoin;
 
 enum SpawnSide {
     Top,
@@ -153,7 +182,7 @@ impl Distribution<SpawnSide> for Standard {
     }
 }
 
-#[derive(Component)]
+#[derive(Component, Default)]
 struct Wraparound;
 
 #[derive(Component)]
@@ -196,35 +225,81 @@ fn setup_game(
             ..default()
         },
     ));
+
+    let window = window.single();
+
+    commands.spawn((
+        Coin,
+        ColorMesh2dBundle {
+            mesh: asset_handles.coin_mesh.clone().into(),
+            material: asset_handles.coin_material.clone().into(),
+            transform: Transform::from_translation(get_coin_spawn_position(
+                window.width(),
+                window.height(),
+            )),
+            ..default()
+        },
+    ));
 }
 
-fn update_game(
+fn hit_coin(
     mut commands: Commands,
-    game_info: Res<GameInfo>,
+    mut hit_event: EventReader<HitCoin>,
+    mut transform: Query<&mut Transform, With<Coin>>,
+    mut game_info: ResMut<GameInfo>,
     asset_handles: Res<AssetHandles>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
+    if hit_event.is_empty() {
+        return;
+    }
+
+    hit_event.clear();
+    game_info.points += 1;
+
+    let window = window.single();
+    let mut transform = transform.single_mut();
+    transform.translation = get_coin_spawn_position(window.width(), window.height());
+
     let spawn_side: SpawnSide = rand::random();
+
     let speed_float: f32 =
         1.0 / (1.0 + E.powf(-SPEED_GROWTH_RATE * (game_info.points as f32 - SPEED_MIDPOINT)));
-    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED;
+    let deviation = SPEED_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
+    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED + deviation;
+
+    let accel = rand::random::<f32>() * (ENEMY_MAX_ACCEL - ENEMY_MIN_ACCEL) + ENEMY_MIN_ACCEL;
+
+    let future_prediction: f32 = rand::random();
+
+    let coin_pull = 2.0 * rand::random::<f32>() - 1.0;
 
     commands.spawn(EnemyBundle {
-        enemy: Enemy { speed: speed },
+        enemy: Enemy { speed, accel, future_prediction, coin_pull },
         color_mesh_2d_bundle: ColorMesh2dBundle {
             mesh: asset_handles.enemy_mesh.clone().into(),
-            material: asset_handles.player_material.clone().into(),
-            transform: Transform::from_translation(get_spawn_position(window, spawn_side)),
+            material: asset_handles.enemy_material.clone().into(),
+            transform: Transform::from_translation(get_enemy_spawn_position(
+                window.width(),
+                window.height(),
+                spawn_side,
+            )),
             ..default()
         },
         ..default()
     });
 }
 
-fn get_spawn_position(window: Query<&Window, With<PrimaryWindow>>, spawn_side: SpawnSide) -> Vec3 {
-    let window = window.single();
-    let vertical = window.height() / 2.0 + PLAYER_RADIUS;
-    let horizontal = window.width() / 2.0 + PLAYER_RADIUS;
+fn get_coin_spawn_position(width: f32, height: f32) -> Vec3 {
+    let x_float: f32 = rand::random();
+    let y_float: f32 = rand::random();
+
+    Vec3::new(width * (x_float - 0.5), height * (y_float - 0.5), 0.0)
+}
+
+fn get_enemy_spawn_position(width: f32, height: f32, spawn_side: SpawnSide) -> Vec3 {
+    let vertical = height / 2.0 + PLAYER_RADIUS;
+    let horizontal = width / 2.0 + PLAYER_RADIUS;
     let rand_float: f32 = rand::random();
 
     match spawn_side {
@@ -236,13 +311,15 @@ fn get_spawn_position(window: Query<&Window, With<PrimaryWindow>>, spawn_side: S
 }
 
 fn hit_player(
-    hit_event: EventReader<HitPlayer>,
+    mut hit_event: EventReader<HitPlayer>,
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemy_query: Query<(&Transform, &mut Velocity), (With<Enemy>, Without<Player>)>,
 ) {
     if hit_event.is_empty() {
         return;
     }
+
+    hit_event.clear();
 
     let player_transform = player_transform.single();
 
@@ -253,7 +330,10 @@ fn hit_player(
                 (transform.translation - player_transform.translation).normalize_or_zero();
             let distance = transform.translation.distance(player_transform.translation);
 
-            let speed = HIT_KNOCKBACK * E.powf(HIT_DECAY_RATE * (distance - (PLAYER_RADIUS + ENEMY_RADIUS)));
+            let speed = HIT_KNOCKBACK
+                * E.powf(HIT_DECAY_RATE * (distance - (PLAYER_RADIUS + ENEMY_RADIUS)));
+            
+            dbg!("{}", speed);
 
             velocity.0 += direction * speed;
         });
@@ -301,26 +381,32 @@ fn get_direction(bindings: Res<InputBindings>, input: Res<Input<KeyCode>>) -> Ve
 
 fn move_enemy(
     mut query: Query<(&mut Transform, &mut Velocity, &Enemy)>,
-    player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
+    player_query: Query<(&Transform, &Velocity), (With<Player>, Without<Enemy>)>,
+    coin_transform: Query<&Transform, (With<Coin>, Without<Player>, Without<Enemy>)>,
     time: Res<Time>,
 ) {
-    if query.is_empty() || player_transform.is_empty() {
+    if query.is_empty() || player_query.is_empty() {
         return;
     }
 
-    let player_transform = player_transform.single();
+    let (player_transform, player_velocity) = player_query.single();
+    let coin_transform = coin_transform.single();
 
     query
         .par_iter_mut()
         .for_each(|(mut transform, mut velocity, enemy)| {
+            let track_position = player_transform.translation + player_velocity.0 * enemy.future_prediction;
             let direction =
-                (player_transform.translation - transform.translation).normalize_or_zero();
+                (track_position - transform.translation).normalize_or_zero();
 
             velocity.0 = vec3_move_toward(
                 velocity.0,
                 direction * enemy.speed,
-                ENEMY_ACCEL * time.delta_seconds(),
+                enemy.accel * time.delta_seconds(),
             );
+
+            let coin_direction = (coin_transform.translation - transform.translation).normalize_or_zero();
+            velocity.0 += coin_direction * enemy.coin_pull * ENEMY_COIN_PULL;
 
             transform.translation += velocity.0 * time.delta_seconds();
         });
@@ -362,7 +448,7 @@ fn wraparound(
     });
 }
 
-fn collision_detection(
+fn enemy_collision(
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     enemy_query: Query<&Transform, (With<Enemy>, Without<Player>)>,
     mut hit_event: EventWriter<HitPlayer>,
@@ -386,6 +472,27 @@ fn collision_detection(
     }
 
     if hit_player {
+        hit_event.send_default();
+    }
+}
+
+fn coin_collision(
+    player_transform: Query<&Transform, (With<Player>, Without<Coin>)>,
+    coin_transform: Query<&Transform, (With<Coin>, Without<Player>)>,
+    mut hit_event: EventWriter<HitCoin>,
+) {
+    if player_transform.is_empty() || coin_transform.is_empty() {
+        return;
+    }
+
+    let player_transform = player_transform.single();
+    let coin_transform = coin_transform.single();
+
+    let distance_squared = player_transform
+        .translation
+        .distance_squared(coin_transform.translation);
+
+    if distance_squared < (PLAYER_RADIUS + COIN_RADIUS).powf(2.0) {
         hit_event.send_default();
     }
 }
