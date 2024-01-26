@@ -8,7 +8,9 @@ use rand::{
 
 const PLAYER_RADIUS: f32 = 16.0;
 const PLAYER_COLOR: Color = Color::BLUE;
-const PLAYER_ACCEL: f32 = 600.0;
+const PLAYER_HEALTH: i8 = 3;
+const PLAYER_INVINCIBILITY_TIME: f32 = 2.0;
+const PLAYER_ACCEL: f32 = 700.0;
 const PLAYER_MAX_SPEED: f32 = 300.0;
 
 const HIT_KNOCKBACK: f32 = 700.0;
@@ -18,8 +20,8 @@ const ENEMY_RADIUS: f32 = 14.0;
 const ENEMY_COLOR: Color = Color::RED;
 const ENEMY_MIN_ACCEL: f32 = 400.0;
 const ENEMY_MAX_ACCEL: f32 = 700.0;
-const ENEMY_MIN_SPEED: f32 = 150.0;
-const ENEMY_MAX_SPEED: f32 = 400.0;
+const ENEMY_MIN_SPEED: f32 = 200.0;
+const ENEMY_MAX_SPEED: f32 = 500.0;
 const ENEMY_COIN_PULL: f32 = 10.0;
 
 const SPEED_GROWTH_RATE: f32 = 0.15;
@@ -45,6 +47,7 @@ fn main() {
                 wraparound,
                 enemy_collision,
                 coin_collision,
+                invincibility_timer,
                 hit_player,
                 hit_coin,
             )
@@ -53,6 +56,7 @@ fn main() {
         )
         .add_systems(Update, debug_start)
         .add_systems(OnEnter(AppState::Game), setup_game)
+        .add_systems(OnExit(AppState::Game), cleanup_game)
         .run();
 }
 
@@ -63,17 +67,21 @@ enum AppState {
     Game,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 struct GameInfo {
-    state: GameState,
     points: i8,
+    health: i8,
+    is_player_invincible: bool,
 }
 
-#[derive(Debug, Default)]
-enum GameState {
-    #[default]
-    Running,
-    Hit,
+impl Default for GameInfo {
+    fn default() -> Self {
+        Self {
+            points: 0,
+            health: PLAYER_HEALTH,
+            is_player_invincible: false,
+        }
+    }
 }
 
 #[derive(Resource)]
@@ -97,29 +105,42 @@ impl Default for InputBindings {
 
 #[derive(Resource)]
 struct AssetHandles {
+    font: Handle<Font>,
     player_mesh: Handle<Mesh>,
     player_material: Handle<ColorMaterial>,
+    hit_sound: Handle<AudioSource>,
     enemy_mesh: Handle<Mesh>,
     enemy_material: Handle<ColorMaterial>,
     coin_mesh: Handle<Mesh>,
     coin_material: Handle<ColorMaterial>,
+    coin_sound: Handle<AudioSource>,
 }
 
 impl AssetHandles {
-    fn new(mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<ColorMaterial>>) -> Self {
+    fn new(
+        asset_server: Res<AssetServer>,
+        mut meshes: ResMut<Assets<Mesh>>,
+        mut materials: ResMut<Assets<ColorMaterial>>,
+    ) -> Self {
         Self {
+            font: asset_server.load("lato.ttf"),
             player_mesh: meshes.add(shape::Circle::new(PLAYER_RADIUS).into()),
             player_material: materials.add(ColorMaterial::from(PLAYER_COLOR)),
+            hit_sound: asset_server.load("hit.ogg"),
             enemy_mesh: meshes.add(shape::Circle::new(ENEMY_RADIUS).into()),
             enemy_material: materials.add(ColorMaterial::from(ENEMY_COLOR)),
             coin_mesh: meshes.add(shape::Circle::new(COIN_RADIUS).into()),
             coin_material: materials.add(ColorMaterial::from(COIN_COLOR)),
+            coin_sound: asset_server.load("coin.ogg"),
         }
     }
 }
 
 #[derive(Component)]
 struct Player;
+
+#[derive(Component)]
+struct InvincibilityTimer(Timer);
 
 #[derive(Component)]
 struct Enemy {
@@ -183,7 +204,9 @@ impl Distribution<SpawnSide> for Standard {
 }
 
 #[derive(Component, Default)]
-struct Wraparound;
+struct Wraparound {
+    radius: f32,
+}
 
 #[derive(Component)]
 struct Velocity(Vec3);
@@ -192,31 +215,52 @@ fn setup(
     mut commands: Commands,
     meshes: ResMut<Assets<Mesh>>,
     materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
 ) {
-    commands.insert_resource(AssetHandles::new(meshes, materials));
+    commands.insert_resource(AssetHandles::new(asset_server, meshes, materials));
     commands.spawn(Camera2dBundle::default());
 }
 
-fn debug_start(
-    mut next_state: ResMut<NextState<AppState>>,
-    player_query: Query<&Player>,
-    input: Res<Input<KeyCode>>,
-) {
-    if input.just_pressed(KeyCode::K) && player_query.is_empty() {
+fn debug_start(mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
+    if input.just_pressed(KeyCode::K) {
         next_state.set(AppState::Game);
+    } else if input.just_pressed(KeyCode::L) {
+        next_state.set(AppState::Menu);
     }
 }
 
 fn setup_game(
     mut commands: Commands,
     window: Query<&Window, With<PrimaryWindow>>,
+
     asset_handles: Res<AssetHandles>,
 ) {
     commands.init_resource::<GameInfo>();
 
+    commands.spawn(InvincibilityTimer(Timer::from_seconds(
+        PLAYER_INVINCIBILITY_TIME,
+        TimerMode::Once,
+    )));
+
+    commands.spawn(Text2dBundle {
+        text: Text::from_section(
+            "0",
+            TextStyle {
+                font: asset_handles.font.clone(),
+                font_size: 420.0,
+                color: Color::DARK_GRAY,
+            },
+        )
+        .with_alignment(TextAlignment::Center),
+        transform: Transform::from_translation(Vec3::new(0.0, 0.0, -10.0)),
+        ..default()
+    });
+
     commands.spawn((
         Player,
-        Wraparound,
+        Wraparound {
+            radius: PLAYER_RADIUS,
+        },
         Velocity(Vec3::ZERO),
         ColorMesh2dBundle {
             mesh: asset_handles.player_mesh.clone().into(),
@@ -232,7 +276,7 @@ fn setup_game(
         Coin,
         ColorMesh2dBundle {
             mesh: asset_handles.coin_mesh.clone().into(),
-            material: asset_handles.coin_material.clone().into(),
+            material: asset_handles.coin_material.clone(),
             transform: Transform::from_translation(get_coin_spawn_position(
                 window.width(),
                 window.height(),
@@ -242,11 +286,23 @@ fn setup_game(
     ));
 }
 
-fn hit_coin(
+fn cleanup_game(
     mut commands: Commands,
+    query: Query<Entity, (Without<Camera2d>, Without<Window>, Without<Handle<AudioSource>>, Without<PlaybackSettings>)>,
+) {
+    commands.remove_resource::<GameInfo>();
+
+    query.iter().for_each(|entity| {
+        commands.entity(entity).despawn();
+    });
+}
+
+fn hit_coin(
     mut hit_event: EventReader<HitCoin>,
-    mut transform: Query<&mut Transform, With<Coin>>,
     mut game_info: ResMut<GameInfo>,
+    mut score_text: Query<&mut Text>,
+    mut commands: Commands,
+    mut transform: Query<&mut Transform, With<Coin>>,
     asset_handles: Res<AssetHandles>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
@@ -256,6 +312,14 @@ fn hit_coin(
 
     hit_event.clear();
     game_info.points += 1;
+
+    let mut score_text = score_text.single_mut();
+    score_text.sections[0].value = game_info.points.to_string();
+
+    commands.spawn(AudioBundle {
+        source: asset_handles.coin_sound.clone(),
+        ..default()
+    });
 
     let window = window.single();
     let mut transform = transform.single_mut();
@@ -275,10 +339,18 @@ fn hit_coin(
     let coin_pull = 2.0 * rand::random::<f32>() - 1.0;
 
     commands.spawn(EnemyBundle {
-        enemy: Enemy { speed, accel, future_prediction, coin_pull },
+        enemy: Enemy {
+            speed,
+            accel,
+            future_prediction,
+            coin_pull,
+        },
+        wraparound: Wraparound {
+            radius: ENEMY_RADIUS,
+        },
         color_mesh_2d_bundle: ColorMesh2dBundle {
             mesh: asset_handles.enemy_mesh.clone().into(),
-            material: asset_handles.enemy_material.clone().into(),
+            material: asset_handles.enemy_material.clone(),
             transform: Transform::from_translation(get_enemy_spawn_position(
                 window.width(),
                 window.height(),
@@ -294,7 +366,7 @@ fn get_coin_spawn_position(width: f32, height: f32) -> Vec3 {
     let x_float: f32 = rand::random();
     let y_float: f32 = rand::random();
 
-    Vec3::new(width * (x_float - 0.5), height * (y_float - 0.5), 0.0)
+    Vec3::new(width * (x_float - 0.5), height * (y_float - 0.5), -1.0)
 }
 
 fn get_enemy_spawn_position(width: f32, height: f32, spawn_side: SpawnSide) -> Vec3 {
@@ -303,15 +375,20 @@ fn get_enemy_spawn_position(width: f32, height: f32, spawn_side: SpawnSide) -> V
     let rand_float: f32 = rand::random();
 
     match spawn_side {
-        SpawnSide::Top => Vec3::new(horizontal * (2.0 * rand_float - 1.0), vertical, 0.0),
-        SpawnSide::Bottom => Vec3::new(horizontal * (2.0 * rand_float - 1.0), -vertical, 0.0),
-        SpawnSide::Left => Vec3::new(-horizontal, vertical * (2.0 * rand_float - 1.0), 0.0),
-        SpawnSide::Right => Vec3::new(horizontal, vertical * (2.0 * rand_float - 1.0), 0.0),
+        SpawnSide::Top => Vec3::new(horizontal * (2.0 * rand_float - 1.0), vertical, 1.0),
+        SpawnSide::Bottom => Vec3::new(horizontal * (2.0 * rand_float - 1.0), -vertical, 1.0),
+        SpawnSide::Left => Vec3::new(-horizontal, vertical * (2.0 * rand_float - 1.0), 1.0),
+        SpawnSide::Right => Vec3::new(horizontal, vertical * (2.0 * rand_float - 1.0), 1.0),
     }
 }
 
 fn hit_player(
     mut hit_event: EventReader<HitPlayer>,
+    mut game_info: ResMut<GameInfo>,
+    mut timer: Query<&mut InvincibilityTimer>,
+    mut commands: Commands,
+    mut next_state: ResMut<NextState<AppState>>,
+    asset_handles: Res<AssetHandles>,
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemy_query: Query<(&Transform, &mut Velocity), (With<Enemy>, Without<Player>)>,
 ) {
@@ -320,6 +397,19 @@ fn hit_player(
     }
 
     hit_event.clear();
+    game_info.health -= 1;
+    game_info.is_player_invincible = true;
+    let mut timer = timer.single_mut();
+    timer.0.reset();
+
+    commands.spawn(AudioBundle {
+        source: asset_handles.hit_sound.clone(),
+        ..default()
+    });
+
+    if game_info.health <= 0 {
+        next_state.set(AppState::Menu);
+    }
 
     let player_transform = player_transform.single();
 
@@ -332,11 +422,20 @@ fn hit_player(
 
             let speed = HIT_KNOCKBACK
                 * E.powf(HIT_DECAY_RATE * (distance - (PLAYER_RADIUS + ENEMY_RADIUS)));
-            
-            dbg!("{}", speed);
 
             velocity.0 += direction * speed;
         });
+}
+
+fn invincibility_timer(
+    time: Res<Time>,
+    mut timer: Query<&mut InvincibilityTimer>,
+    mut game_info: ResMut<GameInfo>,
+) {
+    let mut timer = timer.single_mut();
+    if timer.0.tick(time.delta()).just_finished() {
+        game_info.is_player_invincible = false;
+    }
 }
 
 fn move_player(
@@ -395,9 +494,9 @@ fn move_enemy(
     query
         .par_iter_mut()
         .for_each(|(mut transform, mut velocity, enemy)| {
-            let track_position = player_transform.translation + player_velocity.0 * enemy.future_prediction;
-            let direction =
-                (track_position - transform.translation).normalize_or_zero();
+            let track_position =
+                player_transform.translation + player_velocity.0 * enemy.future_prediction;
+            let direction = (track_position - transform.translation).normalize_or_zero();
 
             velocity.0 = vec3_move_toward(
                 velocity.0,
@@ -405,7 +504,8 @@ fn move_enemy(
                 enemy.accel * time.delta_seconds(),
             );
 
-            let coin_direction = (coin_transform.translation - transform.translation).normalize_or_zero();
+            let coin_direction =
+                (coin_transform.translation - transform.translation).normalize_or_zero();
             velocity.0 += coin_direction * enemy.coin_pull * ENEMY_COIN_PULL;
 
             transform.translation += velocity.0 * time.delta_seconds();
@@ -425,35 +525,38 @@ fn vec3_move_toward(from: Vec3, to: Vec3, distance: f32) -> Vec3 {
 }
 
 fn wraparound(
-    mut transform_query: Query<&mut Transform, With<Wraparound>>,
+    mut query: Query<(&mut Transform, &Wraparound)>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
     let window = window.single();
-    transform_query.par_iter_mut().for_each(|mut transform| {
-        let left = -window.width() / 2.0 - PLAYER_RADIUS;
-        let right = -left;
-        let top = window.height() / 2.0 + PLAYER_RADIUS;
-        let bottom = -top;
+    query
+        .par_iter_mut()
+        .for_each(|(mut transform, wraparound)| {
+            let left = -window.width() / 2.0 - wraparound.radius;
+            let right = -left;
+            let top = window.height() / 2.0 + wraparound.radius;
+            let bottom = -top;
 
-        if transform.translation.x < left {
-            transform.translation.x = right;
-        } else if transform.translation.x > right {
-            transform.translation.x = left;
-        }
-        if transform.translation.y > top {
-            transform.translation.y = bottom;
-        } else if transform.translation.y < bottom {
-            transform.translation.y = top;
-        }
-    });
+            if transform.translation.x < left {
+                transform.translation.x = right;
+            } else if transform.translation.x > right {
+                transform.translation.x = left;
+            }
+            if transform.translation.y > top {
+                transform.translation.y = bottom;
+            } else if transform.translation.y < bottom {
+                transform.translation.y = top;
+            }
+        });
 }
 
 fn enemy_collision(
+    game_info: Res<GameInfo>,
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     enemy_query: Query<&Transform, (With<Enemy>, Without<Player>)>,
     mut hit_event: EventWriter<HitPlayer>,
 ) {
-    if player_transform.is_empty() || enemy_query.is_empty() {
+    if game_info.is_player_invincible || player_transform.is_empty() || enemy_query.is_empty() {
         return;
     }
 
