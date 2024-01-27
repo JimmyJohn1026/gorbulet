@@ -10,7 +10,7 @@ const PLAYER_RADIUS: f32 = 16.0;
 const PLAYER_COLOR: Color = Color::BLUE;
 const PLAYER_HEALTH: i8 = 3;
 const PLAYER_INVINCIBILITY_TIME: f32 = 2.0;
-const PLAYER_ACCEL: f32 = 700.0;
+const PLAYER_ACCEL: f32 = 800.0;
 const PLAYER_MAX_SPEED: f32 = 300.0;
 
 const HIT_KNOCKBACK: f32 = 700.0;
