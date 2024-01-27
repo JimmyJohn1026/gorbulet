@@ -10,7 +10,7 @@ const PLAYER_RADIUS: f32 = 16.0;
 const PLAYER_COLOR: Color = Color::BLUE;
 const PLAYER_HEALTH: i8 = 3;
 const PLAYER_INVINCIBILITY_TIME: f32 = 2.0;
-const PLAYER_ACCEL: f32 = 800.0;
+const PLAYER_ACCEL: f32 = 900.0;
 const PLAYER_MAX_SPEED: f32 = 300.0;
 
 const HIT_KNOCKBACK: f32 = 700.0;
@@ -20,11 +20,13 @@ const HIT_TRAUMA: f32 = 70.0;
 const ENEMY_RADIUS: f32 = 14.0;
 const ENEMY_COLOR_RED: Color = Color::RED;
 const ENEMY_COLOR_PURPLE: Color = Color::PURPLE;
+const ENEMY_PURPLE_COIN_SPAWN: i8 = 16;
+
 const ENEMY_MIN_ACCEL: f32 = 400.0;
 const ENEMY_MAX_ACCEL: f32 = 700.0;
 const ENEMY_MIN_SPEED: f32 = 200.0;
 const ENEMY_MAX_SPEED: f32 = 500.0;
-const ENEMY_COIN_PULL: f32 = 8.0;
+const ENEMY_COIN_PULL: f32 = 10.0;
 
 const SPEED_GROWTH_RATE: f32 = 0.15;
 const SPEED_MIDPOINT: f32 = 20.0;
@@ -35,6 +37,9 @@ const ACCEL_MAX_DEVIATION: f32 = 25.0;
 
 const COIN_RADIUS: f32 = 8.0;
 const COIN_COLOR: Color = Color::YELLOW;
+
+const HEALTH_COLOR: Color = Color::LIME_GREEN;
+const HEALTH_MULTIPLE: i8 = 8;
 
 const SCREEN_SHAKE_X_FREQUENCY: f32 = 10.0;
 const SCREEN_SHAKE_Y_FREQUENCY: f32 = 1.0;
@@ -84,6 +89,12 @@ struct GameInfo {
     is_player_invincible: bool,
 }
 
+impl GameInfo {
+    fn add_health(&mut self, health: i8) {
+        self.health = (self.health + health).min(5);
+    }
+}
+
 impl Default for GameInfo {
     fn default() -> Self {
         Self {
@@ -125,6 +136,8 @@ struct AssetHandles {
     coin_mesh: Handle<Mesh>,
     coin_material: Handle<ColorMaterial>,
     coin_sound: Handle<AudioSource>,
+    health_material: Handle<ColorMaterial>,
+    health_sound: Handle<AudioSource>,
 }
 
 impl AssetHandles {
@@ -144,6 +157,8 @@ impl AssetHandles {
             coin_mesh: meshes.add(shape::Circle::new(COIN_RADIUS).into()),
             coin_material: materials.add(ColorMaterial::from(COIN_COLOR)),
             coin_sound: asset_server.load("coin.ogg"),
+            health_material: materials.add(ColorMaterial::from(HEALTH_COLOR)),
+            health_sound: asset_server.load("health.ogg"),
         }
     }
 }
@@ -172,6 +187,7 @@ struct Enemy {
     accel: f32,
     future_prediction: f32,
     coin_pull: f32,
+    wraparound_follow: bool,
 }
 
 enum EnemyType {
@@ -182,6 +198,7 @@ enum EnemyType {
 #[derive(Bundle)]
 struct EnemyBundle {
     enemy: Enemy,
+    wraparound: Wraparound,
     velocity: Velocity,
     color_mesh_2d_bundle: ColorMesh2dBundle,
 }
@@ -194,7 +211,9 @@ impl Default for EnemyBundle {
                 accel: ENEMY_MIN_ACCEL,
                 future_prediction: 0.0,
                 coin_pull: 0.0,
+                wraparound_follow: false,
             },
+            wraparound: Wraparound::default(),
             velocity: Velocity(Vec3::ZERO),
             color_mesh_2d_bundle: ColorMesh2dBundle::default(),
         }
@@ -248,7 +267,11 @@ fn setup(
     commands.spawn((Camera2dBundle::default(), ScreenShake::default()));
 }
 
-fn debug_start(mut screen_shake: Query<&mut ScreenShake>, mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
+fn debug_start(
+    mut screen_shake: Query<&mut ScreenShake>,
+    mut next_state: ResMut<NextState<AppState>>,
+    input: Res<Input<KeyCode>>,
+) {
     if input.just_pressed(KeyCode::K) {
         next_state.set(AppState::Game);
     } else if input.just_pressed(KeyCode::L) {
@@ -304,6 +327,7 @@ fn setup_game(
 
     commands.spawn((
         Coin,
+        Wraparound { radius: 0.0 },
         ColorMesh2dBundle {
             mesh: asset_handles.coin_mesh.clone().into(),
             material: asset_handles.coin_material.clone(),
@@ -340,7 +364,7 @@ fn hit_coin(
     mut game_info: ResMut<GameInfo>,
     mut score_text: Query<&mut Text>,
     mut commands: Commands,
-    mut transform: Query<&mut Transform, With<Coin>>,
+    mut coin_query: Query<(&mut Transform, &mut Handle<ColorMaterial>), With<Coin>>,
     asset_handles: Res<AssetHandles>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
@@ -354,16 +378,45 @@ fn hit_coin(
     let mut score_text = score_text.single_mut();
     score_text.sections[0].value = game_info.points.to_string();
 
-    commands.spawn(AudioBundle {
-        source: asset_handles.coin_sound.clone(),
-        ..default()
-    });
+    if game_info.points % HEALTH_MULTIPLE == 1 && game_info.points != 1 {
+        commands.spawn(AudioBundle {
+            source: asset_handles.health_sound.clone(),
+            ..default()
+        });
+    } else {
+        commands.spawn(AudioBundle {
+            source: asset_handles.coin_sound.clone(),
+            ..default()
+        });
+    }
 
     let window = window.single();
-    let mut transform = transform.single_mut();
+    let (mut transform, mut material) = coin_query.single_mut();
     transform.translation = get_coin_spawn_position(window.width(), window.height());
 
-    spawn_enemy(commands, window, game_info.points, asset_handles, EnemyType::Purple);
+    if game_info.points % HEALTH_MULTIPLE == 0 {
+        *material = asset_handles.health_material.clone();
+    } else {
+        *material = asset_handles.coin_material.clone();
+    }
+
+    if game_info.points % HEALTH_MULTIPLE == 1 {
+        game_info.add_health(1);
+    }
+
+    let enemy_type = if game_info.points < ENEMY_PURPLE_COIN_SPAWN {
+        EnemyType::Red
+    } else {
+        EnemyType::Purple
+    };
+
+    spawn_enemy(
+        commands,
+        window,
+        game_info.points,
+        asset_handles,
+        enemy_type,
+    );
 }
 
 fn spawn_enemy(
@@ -378,62 +431,59 @@ fn spawn_enemy(
     let speed_float: f32 =
         1.0 / (1.0 + E.powf(-SPEED_GROWTH_RATE * (points as f32 - SPEED_MIDPOINT)));
     let speed_deviation = SPEED_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
-    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED + speed_deviation;
+    let speed =
+        speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED + speed_deviation;
 
     let accel_float: f32 =
         1.0 / (1.0 + E.powf(-ACCEL_GROWTH_RATE * (points as f32 - ACCEL_MIDPOINT)));
     let accel_deviation = ACCEL_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
-    let accel = accel_float * (ENEMY_MAX_ACCEL - ENEMY_MIN_ACCEL) + ENEMY_MIN_ACCEL + accel_deviation;
+    let accel =
+        accel_float * (ENEMY_MAX_ACCEL - ENEMY_MIN_ACCEL) + ENEMY_MIN_ACCEL + accel_deviation;
 
     let future_prediction: f32 = rand::random();
 
-    let coin_pull = 2.0 * rand::random::<f32>() - 1.0;
+    let coin_pull = (2.0 * rand::random::<f32>() - 1.0) * (speed_float * 0.5 + 0.5);
 
     let material = match enemy_type {
         EnemyType::Red => asset_handles.enemy_material_red.clone(),
         EnemyType::Purple => asset_handles.enemy_material_purple.clone(),
     };
 
-    match enemy_type {
-        EnemyType::Red => commands.spawn(EnemyBundle {
-            enemy: Enemy {
-                speed,
-                accel,
-                future_prediction,
-                coin_pull,
-            },
-            color_mesh_2d_bundle: ColorMesh2dBundle {
-                mesh: asset_handles.enemy_mesh.clone().into(),
-                material: material,
-                transform: Transform::from_translation(get_enemy_spawn_position(
-                    window.width(),
-                    window.height(),
-                    spawn_side,
-                )),
-                ..default()
-            },
-            ..default()
-    }),
-    EnemyType::Purple => commands.spawn(EnemyBundle {
+    let wraparound = match enemy_type {
+        EnemyType::Red => Wraparound {
+            radius: ENEMY_RADIUS * 8.0,
+        },
+        EnemyType::Purple => Wraparound {
+            radius: ENEMY_RADIUS,
+        },
+    };
+
+    let wraparound_follow = match enemy_type {
+        EnemyType::Red => false,
+        EnemyType::Purple => true,
+    };
+
+    commands.spawn(EnemyBundle {
         enemy: Enemy {
             speed,
             accel,
             future_prediction,
             coin_pull,
+            wraparound_follow,
         },
+        wraparound,
         color_mesh_2d_bundle: ColorMesh2dBundle {
             mesh: asset_handles.enemy_mesh.clone().into(),
-            material: material,
+            material,
             transform: Transform::from_translation(get_enemy_spawn_position(
-                    window.width(),
-                    window.height(),
-                    spawn_side,
-                    )),
-                    ..default()
+                window.width(),
+                window.height(),
+                spawn_side,
+            )),
+            ..default()
         },
         ..default()
-    }),
-    };
+    });
 }
 
 fn get_coin_spawn_position(width: f32, height: f32) -> Vec3 {
@@ -560,6 +610,7 @@ fn move_enemy(
     mut query: Query<(&mut Transform, &mut Velocity, &Enemy)>,
     player_query: Query<(&Transform, &Velocity), (With<Player>, Without<Enemy>)>,
     coin_transform: Query<&Transform, (With<Coin>, Without<Player>, Without<Enemy>)>,
+    window: Query<&Window, With<PrimaryWindow>>,
     time: Res<Time>,
 ) {
     if query.is_empty() || player_query.is_empty() {
@@ -568,13 +619,24 @@ fn move_enemy(
 
     let (player_transform, player_velocity) = player_query.single();
     let coin_transform = coin_transform.single();
+    let window = window.single();
 
     query
         .par_iter_mut()
         .for_each(|(mut transform, mut velocity, enemy)| {
             let track_position =
                 player_transform.translation + player_velocity.0 * enemy.future_prediction;
-            let direction = (track_position - transform.translation).normalize_or_zero();
+            let wrapped_track_position = if enemy.wraparound_follow {
+                wraparound_tracking_position(
+                    transform.translation,
+                    track_position,
+                    window.width(),
+                    window.height(),
+                )
+            } else {
+                track_position
+            };
+            let direction = (wrapped_track_position - transform.translation).normalize_or_zero();
 
             velocity.0 = vec3_move_toward(
                 velocity.0,
@@ -588,6 +650,35 @@ fn move_enemy(
 
             transform.translation += velocity.0 * time.delta_seconds();
         });
+}
+
+fn wraparound_tracking_position(from: Vec3, to: Vec3, width: f32, height: f32) -> Vec3 {
+    let position_x;
+    let position_y;
+
+    let distance_x = to.x - from.x;
+    let distance_y = to.y - from.y;
+
+    if distance_x.abs() > width / 2.0 {
+        if distance_x < 0.0 {
+            position_x = to.x + width;
+        } else {
+            position_x = to.x - width;
+        }
+    } else {
+        position_x = to.x;
+    }
+    if distance_y.abs() > height / 2.0 {
+        if distance_y < 0.0 {
+            position_y = to.y + height;
+        } else {
+            position_y = to.y - height;
+        }
+    } else {
+        position_y = to.y;
+    }
+
+    Vec3::new(position_x, position_y, 0.0)
 }
 
 fn vec3_move_toward(from: Vec3, to: Vec3, distance: f32) -> Vec3 {
@@ -697,7 +788,6 @@ fn screen_shake(
         screen_shake.trauma * (2.0 * PI * SCREEN_SHAKE_X_FREQUENCY * screen_shake.time).sin();
     transform.translation.y =
         screen_shake.trauma * (2.0 * PI * SCREEN_SHAKE_Y_FREQUENCY * screen_shake.time).sin();
-
 }
 
 fn lerp(from: f32, to: f32, float: f32) -> f32 {
