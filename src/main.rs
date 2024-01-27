@@ -27,7 +27,7 @@ const ENEMY_MIN_ACCEL: f32 = 300.0;
 const ENEMY_MAX_ACCEL: f32 = 600.0;
 const ENEMY_MIN_SPEED: f32 = 200.0;
 const ENEMY_MAX_SPEED: f32 = 500.0;
-const ENEMY_COIN_PULL: f32 = 10.0;
+const ENEMY_COIN_PULL: f32 = 15.0;
 
 const SPEED_GROWTH_RATE: f32 = 0.15;
 const SPEED_MIDPOINT: f32 = 20.0;
@@ -53,6 +53,7 @@ fn main() {
         .add_state::<AppState>()
         .add_event::<HitPlayer>()
         .add_event::<HitCoin>()
+        .add_event::<GainHealth>()
         .add_systems(Startup, setup)
         .add_systems(Update, screen_shake)
         .add_systems(
@@ -66,6 +67,7 @@ fn main() {
                 invincibility_timer,
                 hit_player,
                 hit_coin,
+                update_music
             )
                 .chain()
                 .run_if(in_state(AppState::Game)),
@@ -144,6 +146,11 @@ struct AssetHandles {
     coin_sound: Handle<AudioSource>,
     health_material: Handle<ColorMaterial>,
     health_sound: Handle<AudioSource>,
+    music_5: Handle<AudioSource>,
+    music_4: Handle<AudioSource>,
+    music_3: Handle<AudioSource>,
+    music_2: Handle<AudioSource>,
+    music_1: Handle<AudioSource>,
 }
 
 impl AssetHandles {
@@ -165,9 +172,17 @@ impl AssetHandles {
             coin_sound: asset_server.load("coin.ogg"),
             health_material: materials.add(ColorMaterial::from(HEALTH_COLOR)),
             health_sound: asset_server.load("health.ogg"),
+            music_5: asset_server.load("5.ogg"),
+            music_4: asset_server.load("4.ogg"),
+            music_3: asset_server.load("3.ogg"),
+            music_2: asset_server.load("2.ogg"),
+            music_1: asset_server.load("1.ogg"),
         }
     }
 }
+
+#[derive(Component)]
+struct Music;
 
 #[derive(Component, Default)]
 struct ScreenShake {
@@ -235,6 +250,9 @@ struct Coin;
 #[derive(Event, Default)]
 struct HitCoin;
 
+#[derive(Event, Default)]
+struct GainHealth;
+
 enum SpawnSide {
     Top,
     Bottom,
@@ -274,7 +292,10 @@ fn setup(
     commands.spawn((Camera2dBundle::default(), ScreenShake::default()));
 }
 
-fn debug_start(mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
+fn debug_start(
+    mut next_state: ResMut<NextState<AppState>>,
+    input: Res<Input<KeyCode>>,
+) {
     if input.just_pressed(KeyCode::Space) {
         next_state.set(AppState::Game);
     }
@@ -374,6 +395,14 @@ fn setup_game(
         },
     ));
 
+    commands.spawn((
+        AudioBundle {
+            source: asset_handles.music_3.clone(),
+            settings: PlaybackSettings::LOOP,
+        },
+        Music
+    ));
+
     let window = window.single();
 
     commands.spawn((
@@ -404,6 +433,7 @@ fn cleanup_game(
             Without<PlaybackSettings>,
         ),
     >,
+    music_query: Query<Entity, With<Music>>,
 ) {
     last_score.0 = Some(game_info.points);
 
@@ -412,10 +442,57 @@ fn cleanup_game(
     query.iter().for_each(|entity| {
         commands.entity(entity).despawn();
     });
+    
+    if let Ok(entity) = music_query.get_single() {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn update_music(
+    mut hit_player: EventReader<HitPlayer>,
+    mut gain_health: EventReader<GainHealth>,
+    game_info: Res<GameInfo>,
+    asset_handles: Res<AssetHandles>,
+    query: Query<Entity, With<Music>>,
+    mut commands: Commands,
+) {
+    if hit_player.is_empty() && gain_health.is_empty() {
+        return;
+    }
+
+    if game_info.health == 0 {
+        return;
+    }
+
+    hit_player.clear();
+    gain_health.clear();
+
+    let music = query.single();
+    commands.entity(music).despawn();
+
+    commands.spawn((
+        AudioBundle {
+            source: get_music_handle(asset_handles, game_info.health),
+            settings: PlaybackSettings::LOOP,
+        },
+        Music,
+    ));
+}
+
+fn get_music_handle(asset_handles: Res<AssetHandles>, health: i8) -> Handle<AudioSource> {
+    match health {
+        1 => asset_handles.music_1.clone(),
+        2 => asset_handles.music_2.clone(),
+        3 => asset_handles.music_3.clone(),
+        4 => asset_handles.music_4.clone(),
+        5 => asset_handles.music_5.clone(),
+        _ => unreachable!(),
+    }
 }
 
 fn hit_coin(
-    mut hit_event: EventReader<HitCoin>,
+    mut hit_coin: EventReader<HitCoin>,
+    mut gain_health: EventWriter<GainHealth>,
     mut game_info: ResMut<GameInfo>,
     mut score_text: Query<&mut Text>,
     mut commands: Commands,
@@ -423,11 +500,11 @@ fn hit_coin(
     asset_handles: Res<AssetHandles>,
     window: Query<&Window, With<PrimaryWindow>>,
 ) {
-    if hit_event.is_empty() {
+    if hit_coin.is_empty() {
         return;
     }
 
-    hit_event.clear();
+    hit_coin.clear();
     game_info.points += 1;
 
     let mut score_text = score_text.single_mut();
@@ -435,6 +512,7 @@ fn hit_coin(
 
     if game_info.points % HEALTH_MULTIPLE == 1 && game_info.points != 1 {
         game_info.add_health(1);
+        gain_health.send_default();
         commands.spawn(AudioBundle {
             source: asset_handles.health_sound.clone(),
             ..default()
@@ -494,7 +572,10 @@ fn spawn_enemy(
 
     let future_prediction: f32 = rand::random();
 
-    let coin_pull = (2.0 * rand::random::<f32>() - 1.0) * (speed_float * 0.8 + 0.2);
+    let coin_pull = match enemy_type {
+        EnemyType::Red => (2.0 * rand::random::<f32>() - 1.0) * (speed_float * 0.8 + 0.2),
+        EnemyType::Purple => (2.0 * rand::random::<f32>() - 1.0) * 0.2,
+    };
 
     let accel_multiplier = match enemy_type {
         EnemyType::Red => 1.0,
