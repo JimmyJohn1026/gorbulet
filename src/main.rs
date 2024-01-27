@@ -1,4 +1,4 @@
-use std::f32::consts::E;
+use std::f32::consts::{E, PI};
 
 use bevy::{prelude::*, window::PrimaryWindow};
 use rand::{
@@ -15,6 +15,7 @@ const PLAYER_MAX_SPEED: f32 = 300.0;
 
 const HIT_KNOCKBACK: f32 = 700.0;
 const HIT_DECAY_RATE: f32 = -0.002;
+const HIT_TRAUMA: f32 = 70.0;
 
 const ENEMY_RADIUS: f32 = 14.0;
 const ENEMY_COLOR: Color = Color::RED;
@@ -22,7 +23,7 @@ const ENEMY_MIN_ACCEL: f32 = 400.0;
 const ENEMY_MAX_ACCEL: f32 = 700.0;
 const ENEMY_MIN_SPEED: f32 = 200.0;
 const ENEMY_MAX_SPEED: f32 = 500.0;
-const ENEMY_COIN_PULL: f32 = 10.0;
+const ENEMY_COIN_PULL: f32 = 8.0;
 
 const SPEED_GROWTH_RATE: f32 = 0.15;
 const SPEED_MIDPOINT: f32 = 20.0;
@@ -30,6 +31,10 @@ const SPEED_MAX_DEVIATION: f32 = 50.0;
 
 const COIN_RADIUS: f32 = 8.0;
 const COIN_COLOR: Color = Color::YELLOW;
+
+const SCREEN_SHAKE_X_FREQUENCY: f32 = 10.0;
+const SCREEN_SHAKE_Y_FREQUENCY: f32 = 1.0;
+const SCREEN_SHAKE_LERP: f32 = 0.15;
 
 fn main() {
     App::new()
@@ -39,6 +44,7 @@ fn main() {
         .add_event::<HitPlayer>()
         .add_event::<HitCoin>()
         .add_systems(Startup, setup)
+        .add_systems(Update, screen_shake)
         .add_systems(
             Update,
             (
@@ -136,6 +142,18 @@ impl AssetHandles {
     }
 }
 
+#[derive(Component, Default)]
+struct ScreenShake {
+    trauma: f32,
+    time: f32,
+}
+
+impl ScreenShake {
+    fn add_trauma(&mut self, trauma: f32) {
+        self.trauma += trauma;
+    }
+}
+
 #[derive(Component)]
 struct Player;
 
@@ -218,14 +236,17 @@ fn setup(
     asset_server: Res<AssetServer>,
 ) {
     commands.insert_resource(AssetHandles::new(asset_server, meshes, materials));
-    commands.spawn(Camera2dBundle::default());
+    commands.spawn((Camera2dBundle::default(), ScreenShake::default()));
 }
 
-fn debug_start(mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
+fn debug_start(mut screen_shake: Query<&mut ScreenShake>, mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
     if input.just_pressed(KeyCode::K) {
         next_state.set(AppState::Game);
     } else if input.just_pressed(KeyCode::L) {
         next_state.set(AppState::Menu);
+    } else if input.just_pressed(KeyCode::T) {
+        let mut screen_shake = screen_shake.single_mut();
+        screen_shake.add_trauma(200.0);
     }
 }
 
@@ -288,7 +309,15 @@ fn setup_game(
 
 fn cleanup_game(
     mut commands: Commands,
-    query: Query<Entity, (Without<Camera2d>, Without<Window>, Without<Handle<AudioSource>>, Without<PlaybackSettings>)>,
+    query: Query<
+        Entity,
+        (
+            Without<Camera2d>,
+            Without<Window>,
+            Without<Handle<AudioSource>>,
+            Without<PlaybackSettings>,
+        ),
+    >,
 ) {
     commands.remove_resource::<GameInfo>();
 
@@ -388,6 +417,7 @@ fn hit_player(
     mut timer: Query<&mut InvincibilityTimer>,
     mut commands: Commands,
     mut next_state: ResMut<NextState<AppState>>,
+    mut screen_shake: Query<&mut ScreenShake>,
     asset_handles: Res<AssetHandles>,
     player_transform: Query<&Transform, (With<Player>, Without<Enemy>)>,
     mut enemy_query: Query<(&Transform, &mut Velocity), (With<Enemy>, Without<Player>)>,
@@ -406,6 +436,9 @@ fn hit_player(
         source: asset_handles.hit_sound.clone(),
         ..default()
     });
+
+    let mut screen_shake = screen_shake.single_mut();
+    screen_shake.add_trauma(HIT_TRAUMA);
 
     if game_info.health <= 0 {
         next_state.set(AppState::Menu);
@@ -598,4 +631,30 @@ fn coin_collision(
     if distance_squared < (PLAYER_RADIUS + COIN_RADIUS).powf(2.0) {
         hit_event.send_default();
     }
+}
+
+fn screen_shake(
+    mut query: Query<(&mut Transform, &mut ScreenShake), With<Camera>>,
+    time: Res<Time>,
+) {
+    let (mut transform, mut screen_shake) = query.single_mut();
+
+    if screen_shake.trauma <= 0.0 {
+        screen_shake.time = 0.0;
+        return;
+    }
+
+    screen_shake.trauma = lerp(screen_shake.trauma, 0.0, SCREEN_SHAKE_LERP);
+
+    screen_shake.time += time.delta_seconds();
+
+    transform.translation.x =
+        screen_shake.trauma * (2.0 * PI * SCREEN_SHAKE_X_FREQUENCY * screen_shake.time).sin();
+    transform.translation.y =
+        screen_shake.trauma * (2.0 * PI * SCREEN_SHAKE_Y_FREQUENCY * screen_shake.time).sin();
+
+}
+
+fn lerp(from: f32, to: f32, float: f32) -> f32 {
+    from + float * (to - from)
 }
