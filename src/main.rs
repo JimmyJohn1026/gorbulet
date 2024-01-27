@@ -21,9 +21,10 @@ const ENEMY_RADIUS: f32 = 14.0;
 const ENEMY_COLOR_RED: Color = Color::RED;
 const ENEMY_COLOR_PURPLE: Color = Color::PURPLE;
 const ENEMY_PURPLE_COIN_SPAWN: i8 = 16;
+const ENEMY_PURPLE_ACCEL_MUTLIPLIER: f32 = 0.75;
 
-const ENEMY_MIN_ACCEL: f32 = 400.0;
-const ENEMY_MAX_ACCEL: f32 = 700.0;
+const ENEMY_MIN_ACCEL: f32 = 300.0;
+const ENEMY_MAX_ACCEL: f32 = 600.0;
 const ENEMY_MIN_SPEED: f32 = 200.0;
 const ENEMY_MAX_SPEED: f32 = 500.0;
 const ENEMY_COIN_PULL: f32 = 10.0;
@@ -70,6 +71,8 @@ fn main() {
                 .run_if(in_state(AppState::Game)),
         )
         .add_systems(Update, debug_start)
+        .add_systems(OnEnter(AppState::Menu), setup_menu)
+        .add_systems(OnExit(AppState::Menu), cleanup_menu)
         .add_systems(OnEnter(AppState::Game), setup_game)
         .add_systems(OnExit(AppState::Game), cleanup_game)
         .run();
@@ -77,10 +80,13 @@ fn main() {
 
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash, States)]
 enum AppState {
-    Menu,
     #[default]
+    Menu,
     Game,
 }
+
+#[derive(Resource)]
+struct LastScore(Option<i8>);
 
 #[derive(Resource)]
 struct GameInfo {
@@ -263,23 +269,68 @@ fn setup(
     materials: ResMut<Assets<ColorMaterial>>,
     asset_server: Res<AssetServer>,
 ) {
+    commands.insert_resource(LastScore(None));
     commands.insert_resource(AssetHandles::new(asset_server, meshes, materials));
     commands.spawn((Camera2dBundle::default(), ScreenShake::default()));
 }
 
-fn debug_start(
-    mut screen_shake: Query<&mut ScreenShake>,
-    mut next_state: ResMut<NextState<AppState>>,
-    input: Res<Input<KeyCode>>,
-) {
-    if input.just_pressed(KeyCode::K) {
+fn debug_start(mut next_state: ResMut<NextState<AppState>>, input: Res<Input<KeyCode>>) {
+    if input.just_pressed(KeyCode::Space) {
         next_state.set(AppState::Game);
-    } else if input.just_pressed(KeyCode::L) {
-        next_state.set(AppState::Menu);
-    } else if input.just_pressed(KeyCode::T) {
-        let mut screen_shake = screen_shake.single_mut();
-        screen_shake.add_trauma(200.0);
     }
+}
+
+fn setup_menu(
+    mut commands: Commands,
+    asset_handles: Res<AssetHandles>,
+    last_score: Res<LastScore>,
+) {
+    commands.spawn(Text2dBundle {
+        text: Text::from_section(
+            "Press Space to Start",
+            TextStyle {
+                font: asset_handles.font.clone(),
+                font_size: 120.0,
+                color: Color::DARK_GRAY,
+            },
+        )
+        .with_alignment(TextAlignment::Center),
+        transform: Transform::from_translation(Vec3::new(0.0, -120.0, -10.0)),
+        ..default()
+    });
+
+    if let Some(score) = last_score.0 {
+        commands.spawn(Text2dBundle {
+            text: Text::from_section(
+                score.to_string(),
+                TextStyle {
+                    font: asset_handles.font.clone(),
+                    font_size: 120.0,
+                    color: Color::DARK_GRAY,
+                },
+            )
+            .with_alignment(TextAlignment::Center),
+            transform: Transform::from_translation(Vec3::new(0.0, 0.0, -10.0)),
+            ..default()
+        });
+    }
+}
+
+fn cleanup_menu(
+    mut commands: Commands,
+    query: Query<
+        Entity,
+        (
+            Without<Camera2d>,
+            Without<Window>,
+            Without<Handle<AudioSource>>,
+            Without<PlaybackSettings>,
+        ),
+    >,
+) {
+    query.iter().for_each(|entity| {
+        commands.entity(entity).despawn();
+    });
 }
 
 fn setup_game(
@@ -341,6 +392,8 @@ fn setup_game(
 }
 
 fn cleanup_game(
+    game_info: Res<GameInfo>,
+    mut last_score: ResMut<LastScore>,
     mut commands: Commands,
     query: Query<
         Entity,
@@ -352,6 +405,8 @@ fn cleanup_game(
         ),
     >,
 ) {
+    last_score.0 = Some(game_info.points);
+
     commands.remove_resource::<GameInfo>();
 
     query.iter().for_each(|entity| {
@@ -379,6 +434,7 @@ fn hit_coin(
     score_text.sections[0].value = game_info.points.to_string();
 
     if game_info.points % HEALTH_MULTIPLE == 1 && game_info.points != 1 {
+        game_info.add_health(1);
         commands.spawn(AudioBundle {
             source: asset_handles.health_sound.clone(),
             ..default()
@@ -400,14 +456,10 @@ fn hit_coin(
         *material = asset_handles.coin_material.clone();
     }
 
-    if game_info.points % HEALTH_MULTIPLE == 1 {
-        game_info.add_health(1);
-    }
-
-    let enemy_type = if game_info.points < ENEMY_PURPLE_COIN_SPAWN {
-        EnemyType::Red
-    } else {
+    let enemy_type = if game_info.points >= ENEMY_PURPLE_COIN_SPAWN && game_info.points % 2 == 0 {
         EnemyType::Purple
+    } else {
+        EnemyType::Red
     };
 
     spawn_enemy(
@@ -442,7 +494,12 @@ fn spawn_enemy(
 
     let future_prediction: f32 = rand::random();
 
-    let coin_pull = (2.0 * rand::random::<f32>() - 1.0) * (speed_float * 0.5 + 0.5);
+    let coin_pull = (2.0 * rand::random::<f32>() - 1.0) * (speed_float * 0.8 + 0.2);
+
+    let accel_multiplier = match enemy_type {
+        EnemyType::Red => 1.0,
+        EnemyType::Purple => ENEMY_PURPLE_ACCEL_MUTLIPLIER,
+    };
 
     let material = match enemy_type {
         EnemyType::Red => asset_handles.enemy_material_red.clone(),
@@ -466,7 +523,7 @@ fn spawn_enemy(
     commands.spawn(EnemyBundle {
         enemy: Enemy {
             speed,
-            accel,
+            accel: accel * accel_multiplier,
             future_prediction,
             coin_pull,
             wraparound_follow,
