@@ -18,7 +18,8 @@ const HIT_DECAY_RATE: f32 = -0.002;
 const HIT_TRAUMA: f32 = 70.0;
 
 const ENEMY_RADIUS: f32 = 14.0;
-const ENEMY_COLOR: Color = Color::RED;
+const ENEMY_COLOR_RED: Color = Color::RED;
+const ENEMY_COLOR_PURPLE: Color = Color::PURPLE;
 const ENEMY_MIN_ACCEL: f32 = 400.0;
 const ENEMY_MAX_ACCEL: f32 = 700.0;
 const ENEMY_MIN_SPEED: f32 = 200.0;
@@ -28,6 +29,9 @@ const ENEMY_COIN_PULL: f32 = 8.0;
 const SPEED_GROWTH_RATE: f32 = 0.15;
 const SPEED_MIDPOINT: f32 = 20.0;
 const SPEED_MAX_DEVIATION: f32 = 50.0;
+const ACCEL_GROWTH_RATE: f32 = 0.16;
+const ACCEL_MIDPOINT: f32 = 20.0;
+const ACCEL_MAX_DEVIATION: f32 = 25.0;
 
 const COIN_RADIUS: f32 = 8.0;
 const COIN_COLOR: Color = Color::YELLOW;
@@ -116,7 +120,8 @@ struct AssetHandles {
     player_material: Handle<ColorMaterial>,
     hit_sound: Handle<AudioSource>,
     enemy_mesh: Handle<Mesh>,
-    enemy_material: Handle<ColorMaterial>,
+    enemy_material_red: Handle<ColorMaterial>,
+    enemy_material_purple: Handle<ColorMaterial>,
     coin_mesh: Handle<Mesh>,
     coin_material: Handle<ColorMaterial>,
     coin_sound: Handle<AudioSource>,
@@ -134,7 +139,8 @@ impl AssetHandles {
             player_material: materials.add(ColorMaterial::from(PLAYER_COLOR)),
             hit_sound: asset_server.load("hit.ogg"),
             enemy_mesh: meshes.add(shape::Circle::new(ENEMY_RADIUS).into()),
-            enemy_material: materials.add(ColorMaterial::from(ENEMY_COLOR)),
+            enemy_material_red: materials.add(ColorMaterial::from(ENEMY_COLOR_RED)),
+            enemy_material_purple: materials.add(ColorMaterial::from(ENEMY_COLOR_PURPLE)),
             coin_mesh: meshes.add(shape::Circle::new(COIN_RADIUS).into()),
             coin_material: materials.add(ColorMaterial::from(COIN_COLOR)),
             coin_sound: asset_server.load("coin.ogg"),
@@ -168,10 +174,14 @@ struct Enemy {
     coin_pull: f32,
 }
 
+enum EnemyType {
+    Red,
+    Purple,
+}
+
 #[derive(Bundle)]
 struct EnemyBundle {
     enemy: Enemy,
-    wraparound: Wraparound,
     velocity: Velocity,
     color_mesh_2d_bundle: ColorMesh2dBundle,
 }
@@ -185,7 +195,6 @@ impl Default for EnemyBundle {
                 future_prediction: 0.0,
                 coin_pull: 0.0,
             },
-            wraparound: Wraparound::default(),
             velocity: Velocity(Vec3::ZERO),
             color_mesh_2d_bundle: ColorMesh2dBundle::default(),
         }
@@ -354,41 +363,77 @@ fn hit_coin(
     let mut transform = transform.single_mut();
     transform.translation = get_coin_spawn_position(window.width(), window.height());
 
+    spawn_enemy(commands, window, game_info.points, asset_handles, EnemyType::Purple);
+}
+
+fn spawn_enemy(
+    mut commands: Commands,
+    window: &Window,
+    points: i8,
+    asset_handles: Res<AssetHandles>,
+    enemy_type: EnemyType,
+) {
     let spawn_side: SpawnSide = rand::random();
 
     let speed_float: f32 =
-        1.0 / (1.0 + E.powf(-SPEED_GROWTH_RATE * (game_info.points as f32 - SPEED_MIDPOINT)));
-    let deviation = SPEED_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
-    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED + deviation;
+        1.0 / (1.0 + E.powf(-SPEED_GROWTH_RATE * (points as f32 - SPEED_MIDPOINT)));
+    let speed_deviation = SPEED_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
+    let speed = speed_float * (ENEMY_MAX_SPEED - ENEMY_MIN_SPEED) + ENEMY_MIN_SPEED + speed_deviation;
 
-    let accel = rand::random::<f32>() * (ENEMY_MAX_ACCEL - ENEMY_MIN_ACCEL) + ENEMY_MIN_ACCEL;
+    let accel_float: f32 =
+        1.0 / (1.0 + E.powf(-ACCEL_GROWTH_RATE * (points as f32 - ACCEL_MIDPOINT)));
+    let accel_deviation = ACCEL_MAX_DEVIATION * (2.0 * rand::random::<f32>() - 1.0);
+    let accel = accel_float * (ENEMY_MAX_ACCEL - ENEMY_MIN_ACCEL) + ENEMY_MIN_ACCEL + accel_deviation;
 
     let future_prediction: f32 = rand::random();
 
     let coin_pull = 2.0 * rand::random::<f32>() - 1.0;
 
-    commands.spawn(EnemyBundle {
+    let material = match enemy_type {
+        EnemyType::Red => asset_handles.enemy_material_red.clone(),
+        EnemyType::Purple => asset_handles.enemy_material_purple.clone(),
+    };
+
+    match enemy_type {
+        EnemyType::Red => commands.spawn(EnemyBundle {
+            enemy: Enemy {
+                speed,
+                accel,
+                future_prediction,
+                coin_pull,
+            },
+            color_mesh_2d_bundle: ColorMesh2dBundle {
+                mesh: asset_handles.enemy_mesh.clone().into(),
+                material: material,
+                transform: Transform::from_translation(get_enemy_spawn_position(
+                    window.width(),
+                    window.height(),
+                    spawn_side,
+                )),
+                ..default()
+            },
+            ..default()
+    }),
+    EnemyType::Purple => commands.spawn(EnemyBundle {
         enemy: Enemy {
             speed,
             accel,
             future_prediction,
             coin_pull,
         },
-        wraparound: Wraparound {
-            radius: ENEMY_RADIUS,
-        },
         color_mesh_2d_bundle: ColorMesh2dBundle {
             mesh: asset_handles.enemy_mesh.clone().into(),
-            material: asset_handles.enemy_material.clone(),
+            material: material,
             transform: Transform::from_translation(get_enemy_spawn_position(
-                window.width(),
-                window.height(),
-                spawn_side,
-            )),
-            ..default()
+                    window.width(),
+                    window.height(),
+                    spawn_side,
+                    )),
+                    ..default()
         },
         ..default()
-    });
+    }),
+    };
 }
 
 fn get_coin_spawn_position(width: f32, height: f32) -> Vec3 {
